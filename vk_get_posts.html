@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Случайные посты из подписок VK</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; margin: 0; padding: 20px; background-color: #f0f2f5; }
+        .container { max-width: 800px; margin: 0 auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        #loader { text-align: center; font-size: 18px; color: #555; display: none; }
+        .post { border: 1px solid #ddd; padding: 15px; margin-bottom: 20px; border-radius: 8px; background-color: #f9f9f9; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+        .post-header { font-size: 12px; color: #888; margin-bottom: 10px; }
+        .post-content { font-size: 16px; }
+        .post-link { display: block; margin-top: 10px; font-size: 14px; text-align: right; }
+        button { display: block; width: 100%; padding: 15px; font-size: 16px; font-weight: bold; color: #fff; background-color: #0077ff; border: none; border-radius: 8px; cursor: pointer; transition: background-color 0.2s; }
+        button:hover { background-color: #005dcc; }
+        #posts-container { margin-top: 20px; }
+        .status-message { text-align: center; color: #888; margin-top: 15px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Случайные посты из подписок VK</h1>
+        <button id="load-posts-btn">Обновить ленту</button>
+        <div id="loader">Загрузка...</div>
+        <div id="posts-container"></div>
+    </div>
+
+    <script>
+        // --- НАСТРОЙКИ ---
+        const accessToken = 'ВАШ_КЛЮЧ_ДОСТУПА_ОТ_KATE_MOBILE'; // <-- ВСТАВЬТЕ СЮДА СВОЙ КЛЮЧ
+        const vkApiVersion = '5.199';
+        const subscriptionsFile = 'subscriptions.html';
+        const postsToLoad = 5;
+        const cacheKey = 'vk_cached_posts'; // Ключ для хранения в localStorage
+        // --- КОНЕЦ НАСТРОЕК ---
+
+        const loadButton = document.getElementById('load-posts-btn');
+        const postsContainer = document.getElementById('posts-container');
+        const loader = document.getElementById('loader');
+
+        // *** НОВОЕ: При загрузке страницы пытаемся загрузить посты из кэша ***
+        document.addEventListener('DOMContentLoaded', () => {
+            const cachedPosts = getPostsFromCache();
+            if (cachedPosts && cachedPosts.length > 0) {
+                postsContainer.innerHTML = ''; // Очищаем на всякий случай
+                cachedPosts.forEach(post => displayPost(post));
+                postsContainer.insertAdjacentHTML('afterbegin', `<p class="status-message">Загружено из кэша. Нажмите "Обновить", чтобы загрузить новые посты.</p>`);
+            } else {
+                 postsContainer.innerHTML = `<p class="status-message">Нажмите кнопку, чтобы загрузить случайные посты.</p>`;
+            }
+        });
+
+        loadButton.addEventListener('click', main);
+
+        async function main() {
+            loader.style.display = 'block';
+            postsContainer.innerHTML = '';
+            loadButton.disabled = true;
+
+            try {
+                let allGroupLinks = await parseSubscriptions(subscriptionsFile);
+                if (allGroupLinks.length < postsToLoad) {
+                    throw new Error(`Недостаточно подписок (${allGroupLinks.length}) для загрузки ${postsToLoad} постов.`);
+                }
+                allGroupLinks = allGroupLinks.sort(() => 0.5 - Math.random());
+
+                const foundPosts = [];
+                const monthAgoTimestamp = Math.floor((Date.now() / 1000) - (30 * 24 * 60 * 60));
+                let attempts = 0;
+                const maxAttempts = allGroupLinks.length + 10;
+
+                while (foundPosts.length < postsToLoad && allGroupLinks.length > 0 && attempts < maxAttempts) {
+                    const groupLink = allGroupLinks.pop();
+                    const groupId = groupLink.split('/').pop();
+                    
+                    updateLoaderMessage(`Ищем пост в группе ${groupId}... Найдено ${foundPosts.length}/${postsToLoad}`);
+
+                    const post = await getRandomPost(groupId, monthAgoTimestamp);
+                    if (post) {
+                        foundPosts.push(post);
+                    }
+                    attempts++;
+                }
+                
+                // Отображаем все найденные посты разом
+                foundPosts.forEach(post => displayPost(post));
+
+                // *** НОВОЕ: Сохраняем найденные посты в кэш ***
+                if (foundPosts.length > 0) {
+                    savePostsToCache(foundPosts);
+                }
+
+                if (foundPosts.length < postsToLoad) {
+                    const message = `Не удалось найти ${postsToLoad} постов. Найдено и сохранено в кэш: ${foundPosts.length}.`;
+                    postsContainer.insertAdjacentHTML('beforeend', `<p class="status-message">${message}</p>`);
+                }
+
+            } catch (error) {
+                console.error('Произошла ошибка:', error);
+                postsContainer.innerHTML = `<p style="color: red;">Ошибка: ${error.message}</p>`;
+            } finally {
+                loader.style.display = 'none';
+                loadButton.disabled = false;
+            }
+        }
+        
+        function updateLoaderMessage(message) {
+            loader.textContent = message;
+        }
+
+        // *** НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С КЭШЕМ ***
+        function savePostsToCache(posts) {
+            try {
+                localStorage.setItem(cacheKey, JSON.stringify(posts));
+            } catch (e) {
+                console.error("Ошибка сохранения в кэш:", e);
+            }
+        }
+
+        function getPostsFromCache() {
+            try {
+                const cachedData = localStorage.getItem(cacheKey);
+                return cachedData ? JSON.parse(cachedData) : null;
+            } catch (e) {
+                console.error("Ошибка чтения из кэша:", e);
+                return null;
+            }
+        }
+
+        async function parseSubscriptions(filePath) {
+            const response = await fetch(filePath);
+            if (!response.ok) throw new Error(`Не удалось загрузить файл подписок: ${response.statusText}.`);
+            const htmlText = await response.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(htmlText, 'text/html');
+            const links = Array.from(doc.querySelectorAll('.item__main a')).map(a => a.href);
+            return links.filter(href => href.startsWith('https://vk.com/'));
+        }
+
+        function vkApiCall(method, params) {
+            return new Promise((resolve, reject) => {
+                const callbackName = 'vk_callback_' + Math.round(Math.random() * 10000);
+                window[callbackName] = (data) => {
+                    delete window[callbackName];
+                    document.body.removeChild(script);
+                    if (data.error) reject(new Error(`Ошибка VK API: ${data.error.error_msg}`));
+                    else resolve(data.response);
+                };
+                params.v = vkApiVersion;
+                params.access_token = accessToken;
+                params.callback = callbackName;
+                const query = Object.entries(params).map(([key, val]) => `${key}=${encodeURIComponent(val)}`).join('&');
+                const script = document.createElement('script');
+                script.src = `https://api.vk.com/method/${method}?${query}`;
+                script.onerror = () => reject(new Error('Не удалось выполнить запрос к VK API.'));
+                document.body.appendChild(script);
+            });
+        }
+
+        async function getRandomPost(ownerId, startTime) {
+            try {
+                const domain = ownerId.startsWith('public') || ownerId.startsWith('club') 
+                    ? `-${ownerId.replace('public', '').replace('club', '')}` 
+                    : ownerId;
+                const response = await vkApiCall('wall.get', { owner_id: domain, count: 100, filter: 'owner' });
+                const recentPosts = response.items.filter(post => post.date >= startTime && post.text && post.text.trim() !== '');
+                if (recentPosts.length > 0) return recentPosts.sort(() => 0.5 - Math.random())[0];
+                return null;
+            } catch (error) {
+                console.error(`Не удалось получить посты для группы ${ownerId}:`, error);
+                return null;
+            }
+        }
+
+        function displayPost(post) {
+            const postElement = document.createElement('div');
+            postElement.className = 'post';
+            const postDate = new Date(post.date * 1000).toLocaleString('ru-RU');
+            const postLink = `https://vk.com/wall${post.owner_id}_${post.id}`;
+            postElement.innerHTML = `
+                <div class="post-header">Дата: ${postDate}</div>
+                <div class="post-content">${post.text.replace(/\n/g, '<br>')}</div>
+                <a href="${postLink}" target="_blank" class="post-link">Перейти к посту</a>
+            `;
+            postsContainer.appendChild(postElement);
+        }
+    </script>
+
+</body>
+</html>
